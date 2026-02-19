@@ -1,0 +1,638 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Cube Alg Visualizer</title>
+
+<style>
+  :root{
+    --bg:#ffffff; --text:#000000;
+    --tile-bg:#ffffff; --tile-border:#dddddd;
+    --stroke:#000000;
+  }
+
+  body.dark{
+    --bg:#0f1115; --text:#e9eef7;
+    --tile-bg:#151923; --tile-border:#2a3142;
+    --stroke:#e9eef7;
+  }
+
+  body{
+    font-family:system-ui,sans-serif;
+    padding:20px;
+    background:var(--bg);
+    color:var(--text);
+  }
+
+  textarea{
+    width: 1040px;
+    height: 120px;
+    background:var(--tile-bg);
+    color:var(--text);
+    border:1px solid var(--tile-border);
+    border-radius:10px;
+    padding:10px;
+
+    resize:none;
+    overflow-y:auto;
+  }
+
+  .controls{
+    display:flex;
+    gap:18px;
+    align-items:center;
+    margin-top:10px;
+  }
+
+  button{
+    background:var(--tile-bg);
+    color:var(--text);
+    border:1px solid var(--tile-border);
+    border-radius:10px;
+    padding:8px 12px;
+    cursor:pointer;
+  }
+
+  label{
+    user-select:none;
+    display:flex;
+    gap:8px;
+    align-items:center;
+  }
+
+  #out{
+    display:grid;
+    gap:20px 30px;
+    margin-top:20px;
+    align-items:start;
+  }
+
+  .tile{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+  }
+
+  svg{
+    border:1px solid var(--tile-border);
+    border-radius:10px;
+    background:var(--tile-bg);
+  }
+</style>
+</head>
+
+<body>
+
+<textarea id="alg">R R' R2 L L' L2 U U' U2 D D' D2 F F' F2 B B' B2 r r' r2 l l' l2 u u' u2 d d' d2 f f' f2 b b' b2 Rw Rw' Rw2 Lw Lw' Lw2 Uw Uw' Uw2 Dw Dw' Dw2 Fw Fw' Fw2 Bw Bw' Bw2 M M' M2 E E' E2 S S' S2 x x' y y'</textarea>
+
+<div class="controls">
+  <button id="clearBtn">Clear</button>
+
+  <label>
+    <input type="checkbox" id="showLabels" checked />
+    Show notation
+  </label>
+
+  <label>
+    <input type="checkbox" id="darkMode" checked />
+    Dark mode
+  </label>
+
+  <label>
+  Max Columns:
+  <input type="number" id="maxCols" min="1" style="width:60px;">
+  </label>
+
+  <label>
+  Max Rows:
+  <input type="number" id="maxRows" min="1" style="width:60px;">
+</label>
+</div>
+
+<div id="out"></div>
+
+<script>
+const ns = "http://www.w3.org/2000/svg";
+
+const TILE = 90;
+const PAD  = 8;
+const GRID = TILE - PAD*2;
+const CELL = GRID / 3;
+
+// Curved radii for wide Fw/Bw
+const ARC_R_NORMAL     = 26;
+const ARC_R_WIDE_OUTER = ARC_R_NORMAL + 2;
+const ARC_R_WIDE_INNER = ARC_R_NORMAL * 0.75;
+
+/* ---------- helpers ---------- */
+function el(tag, attrs={}){
+  const e = document.createElementNS(ns, tag);
+  for (const [k,v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+function parseAlg(str){
+  return str
+    .replace(/[(){}\[\]]/g, " ")   // remove brackets
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+
+function parseMove(tokRaw){
+  const tok = tokRaw.trim();
+  if (!tok) return null;
+
+  const c0 = tok[0];
+  const baseUpper = c0.toUpperCase();
+
+  const isPrime  = tok.includes("'");
+  const isDouble = tok.includes("2");
+
+  // Wide moves: lowercase or "w" suffix for R L U D F B
+  let isWide = false;
+  const second = tok[1] || "";
+  if ("RLUDFB".includes(baseUpper)) {
+    if (c0 === c0.toLowerCase()) isWide = true;        // r u f b ...
+    if (second.toLowerCase() === "w") isWide = true;   // Rw Fw ...
+  }
+
+  // No wide variants for slices/rotations
+  if (["M","E","S","X","Y"].includes(baseUpper)) isWide = false;
+
+  let dir = null;
+
+  // Face turns
+  if (baseUpper === "R") dir = isPrime ? "down" : "up";
+  if (baseUpper === "L") dir = isPrime ? "up"   : "down";
+  if (baseUpper === "U") dir = isPrime ? "right": "left";
+  if (baseUpper === "D") dir = isPrime ? "left" : "right";
+  if (baseUpper === "F") dir = isPrime ? "ccw"  : "cw";
+  if (baseUpper === "B") dir = isPrime ? "cw"   : "ccw";
+
+  // Slices
+  if (baseUpper === "M") dir = isPrime ? "down" : "up";      // like L'
+  if (baseUpper === "E") dir = isPrime ? "right" : "left";   // like D'
+  if (baseUpper === "S") dir = isPrime ? "ccw" : "cw";       // like F
+
+  // Rotations
+  if (baseUpper === "X") dir = isPrime ? "down" : "up";      // like R
+  if (baseUpper === "Y") dir = isPrime ? "right": "left";    // like U
+
+  return { raw: tokRaw, tok, baseUpper, dir, isPrime, isDouble, isWide };
+}
+
+function notationString(ins){
+  let s;
+
+  // Wide moves display as lowercase face letter
+  if (ins.isWide && "RLUDFB".includes(ins.baseUpper)) {
+    s = ins.baseUpper.toLowerCase();
+  } else {
+    s = ins.baseUpper;
+  }
+
+  if (ins.isPrime)  s += "'";
+  if (ins.isDouble) s += "2";
+
+  return s;
+}
+
+
+/* ---------- grid (optionally remove inner verticals ONLY in middle row) ---------- */
+function drawGrid(svg, hideMiddleRowInnerVerticals=false){
+
+  for (let i=0;i<=3;i++){
+    const x = PAD + i*CELL;
+    const isInner = (i === 1 || i === 2);
+
+    if (hideMiddleRowInnerVerticals && isInner){
+      // top segment
+      svg.appendChild(el("line",{
+        x1:x, y1:PAD,
+        x2:x, y2:PAD + CELL,
+        stroke:"var(--stroke)",
+        "stroke-width":"2"
+      }));
+      // bottom segment
+      svg.appendChild(el("line",{
+        x1:x, y1:PAD + 2*CELL,
+        x2:x, y2:PAD + 3*CELL,
+        stroke:"var(--stroke)",
+        "stroke-width":"2"
+      }));
+    } else {
+      // full line
+      svg.appendChild(el("line",{
+        x1:x, y1:PAD,
+        x2:x, y2:PAD + GRID,
+        stroke:"var(--stroke)",
+        "stroke-width":"2"
+      }));
+    }
+  }
+
+  // horizontals always
+  for (let i=0;i<=3;i++){
+    svg.appendChild(el("line",{
+      x1:PAD, y1:PAD + i*CELL,
+      x2:PAD + GRID, y2:PAD + i*CELL,
+      stroke:"var(--stroke)",
+      "stroke-width":"2"
+    }));
+  }
+}
+
+/* ---------- arrow markers (scaled) ---------- */
+function ensureArrowMarkers(svg){
+  let defs = svg.querySelector("defs");
+  if (!defs) { defs = el("defs"); svg.appendChild(defs); }
+
+  function addMarker(id, scale){
+    if (svg.querySelector("#" + id)) return;
+
+    const w = 4 * scale;
+    const h = 4 * scale;
+
+    const marker = el("marker",{
+      id,
+      markerWidth: String(w),
+      markerHeight: String(h),
+      refX: String(2.85 * scale),
+      refY: String(2 * scale),
+      orient: "90",
+      markerUnits: "strokeWidth"
+    });
+
+    marker.appendChild(el("path",{
+      d: `M 0 0 L ${w} ${h/2} L 0 ${h} z`,
+      fill: "var(--stroke)"
+    }));
+
+    defs.appendChild(marker);
+  }
+
+  addMarker("arrowHeadSmall", 1);
+  addMarker("arrowHeadWide",  ARC_R_WIDE_OUTER / ARC_R_NORMAL);
+  addMarker("arrowHeadInner", ARC_R_WIDE_INNER / ARC_R_NORMAL);
+}
+
+/* ---------- straight arrows ---------- */
+function drawStraightArrow(svg, dir, cx, cy, len=24){
+  const g = el("g",{ transform:`translate(${cx},${cy})` });
+  svg.appendChild(g);
+
+  const line = el("line",{
+    stroke:"var(--stroke)",
+    "stroke-width":"3",
+    "stroke-linecap":"round"
+  });
+
+  const head = el("polygon",{ fill:"var(--stroke)" });
+
+  if(dir==="up"){
+    line.setAttribute("x1",0); line.setAttribute("y1", len);
+    line.setAttribute("x2",0); line.setAttribute("y2",-len);
+    head.setAttribute("points", `0,${-len-8} -5,${-len+4} 5,${-len+4}`);
+  }
+  if(dir==="down"){
+    line.setAttribute("x1",0); line.setAttribute("y1",-len);
+    line.setAttribute("x2",0); line.setAttribute("y2", len);
+    head.setAttribute("points", `0,${len+8} -5,${len-4} 5,${len-4}`);
+  }
+  if(dir==="left"){
+    line.setAttribute("x1", len); line.setAttribute("y1",0);
+    line.setAttribute("x2",-len); line.setAttribute("y2",0);
+    head.setAttribute("points", `${-len-8},0 ${-len+4},-5 ${-len+4},5`);
+  }
+  if(dir==="right"){
+    line.setAttribute("x1",-len); line.setAttribute("y1",0);
+    line.setAttribute("x2", len); line.setAttribute("y2",0);
+    head.setAttribute("points", `${len+8},0 ${len-4},-5 ${len-4},5`);
+  }
+
+  g.appendChild(line);
+  g.appendChild(head);
+}
+
+function drawStraightArrowGap(svg, dir, cx, cy, len=24, gap=18){
+  const g = el("g",{ transform:`translate(${cx},${cy})` });
+  svg.appendChild(g);
+
+  const head = el("polygon",{ fill:"var(--stroke)" });
+
+  const a = gap/2;
+
+  function addLine(x1,y1,x2,y2){
+    g.appendChild(el("line",{
+      x1, y1, x2, y2,
+      stroke:"var(--stroke)",
+      "stroke-width":"3",
+      "stroke-linecap":"round"
+    }));
+  }
+
+  if(dir==="up"){
+    addLine(0,  len, 0,  a);
+    addLine(0, -a,   0, -len);
+    head.setAttribute("points", `0,${-len-8} -5,${-len+4} 5,${-len+4}`);
+  }
+  if(dir==="down"){
+    addLine(0, -len, 0, -a);
+    addLine(0,  a,   0,  len);
+    head.setAttribute("points", `0,${len+8} -5,${len-4} 5,${len-4}`);
+  }
+  if(dir==="left"){
+    addLine( len, 0,  a,  0);
+    addLine(-a,   0, -len,0);
+    head.setAttribute("points", `${-len-8},0 ${-len+4},-5 ${-len+4},5`);
+  }
+  if(dir==="right"){
+    addLine(-len,0, -a,  0);
+    addLine( a,  0,  len,0);
+    head.setAttribute("points", `${len+8},0 ${len-4},-5 ${len-4},5`);
+  }
+
+  g.appendChild(head);
+}
+
+
+/* ---------- curved arcs ---------- */
+function arcPath(dir, cx, cy, r){
+  const off = 6 * (r / ARC_R_NORMAL);
+  if (dir === "cw")  return `M ${cx-r} ${cy-off} A ${r} ${r} 0 0 1 ${cx+r} ${cy+off}`;
+  return              `M ${cx+r} ${cy-off} A ${r} ${r} 0 0 0 ${cx-r} ${cy+off}`;
+}
+
+function drawCurvedMove(svg, dir, r=ARC_R_NORMAL, markerId="arrowHeadSmall"){
+  ensureArrowMarkers(svg);
+
+  const cx = PAD + GRID/2;
+  const cy = PAD + GRID/2;
+
+  svg.appendChild(el("path",{
+    d: arcPath(dir, cx, cy, r),
+    fill:"none",
+    stroke:"var(--stroke)",
+    "stroke-width":"3",
+    "stroke-linecap":"round",
+    "marker-end":`url(#${markerId})`
+  }));
+}
+
+function drawCurvedWide(svg, dir){
+  drawCurvedMove(svg, dir, ARC_R_WIDE_OUTER, "arrowHeadWide");
+  drawCurvedMove(svg, dir, ARC_R_WIDE_INNER, "arrowHeadInner");
+}
+
+/* ---------- notation text ---------- */
+function drawCenterText(svg, textStr, position="center"){
+  let x = PAD + GRID/2;
+  let y = PAD + GRID/2 + 7;
+
+  if(position === "left")  x -= CELL;
+  if(position === "right") x += CELL;
+  if(position === "up")    y -= CELL;
+  if(position === "down")  y += CELL;
+
+  const t = el("text",{
+    x, y,
+    "text-anchor":"middle",
+    "font-size":"18",
+    "font-weight":"700",
+    fill:"var(--stroke)"
+  });
+
+  t.textContent = textStr;
+  svg.appendChild(t);
+}
+
+/* ---------- cube rotations arrows ---------- */
+function drawXRotation(svg, dir, cutMiddle=false){
+  const xLeft  = PAD + 0.5*CELL;
+  const xMid   = PAD + 1.5*CELL;
+  const xRight = PAD + 2.5*CELL;
+  const yMid   = PAD + 1.5*CELL;
+
+  drawStraightArrow(svg, dir, xLeft,  yMid);
+
+  if (cutMiddle) {
+    drawStraightArrowGap(svg, dir, xMid, yMid, 24, 25);
+  } else {
+    drawStraightArrow(svg, dir, xMid, yMid);
+  }
+
+  drawStraightArrow(svg, dir, xRight, yMid);
+}
+
+function drawYRotation(svg, dir, cutMiddle=false){
+  const xMid = PAD + 1.5*CELL;
+  const yTop = PAD + 0.5*CELL;
+  const yMid = PAD + 1.5*CELL;
+  const yBot = PAD + 2.5*CELL;
+
+  drawStraightArrow(svg, dir, xMid, yTop);
+
+  if (cutMiddle) {
+    drawStraightArrowGap(svg, dir, xMid, yMid, 24, 26);
+  } else {
+    drawStraightArrow(svg, dir, xMid, yMid);
+  }
+
+  drawStraightArrow(svg, dir, xMid, yBot);
+}
+
+
+
+function drawStraightArrowGap(svg, dir, cx, cy, len=24, gap=20){
+  const g = el("g",{ transform:`translate(${cx},${cy})` });
+  svg.appendChild(g);
+
+  const head = el("polygon",{ fill:"var(--stroke)" });
+  const a = gap / 2;
+
+  function addLine(x1,y1,x2,y2){
+    g.appendChild(el("line",{
+      x1, y1, x2, y2,
+      stroke:"var(--stroke)",
+      "stroke-width":"3",
+      "stroke-linecap":"round"
+    }));
+  }
+
+  if(dir==="up"){
+    addLine(0,  len, 0,  a);
+    addLine(0, -a,   0, -len);
+    head.setAttribute("points", `0,${-len-8} -5,${-len+4} 5,${-len+4}`);
+  }
+  if(dir==="down"){
+    addLine(0, -len, 0, -a);
+    addLine(0,  a,   0,  len);
+    head.setAttribute("points", `0,${len+8} -5,${len-4} 5,${len-4}`);
+  }
+  if(dir==="left"){
+    addLine( len, 0,  a,  0);
+    addLine(-a,   0, -len,0);
+    head.setAttribute("points", `${-len-8},0 ${-len+4},-5 ${-len+4},5`);
+  }
+  if(dir==="right"){
+    addLine(-len,0, -a,  0);
+    addLine( a,  0,  len,0);
+    head.setAttribute("points", `${len+8},0 ${len-4},-5 ${len-4},5`);
+  }
+
+  g.appendChild(head);
+}
+
+
+/* ---------- layout rule ---------- */
+function chooseColumns(n){
+  const maxColsInput = document.getElementById("maxCols").value;
+  const maxRowsInput = document.getElementById("maxRows").value;
+
+  const maxCols = maxColsInput ? parseInt(maxColsInput) : null;
+  const maxRows = maxRowsInput ? parseInt(maxRowsInput) : null;
+
+  // If user provided limits
+  if (maxCols || maxRows) {
+    let cols = maxCols || 1;
+
+    while (cols <= n) {
+      const rows = Math.ceil(n / cols);
+
+      if (maxRows && rows > maxRows) {
+        cols++;
+        continue;
+      }
+
+      return cols;
+    }
+
+    return n; // fallback
+  }
+
+  // Default behavior (your +2 rule)
+  let cols = 3;
+  while (cols < n) {
+    const rows = Math.ceil(n / cols);
+    if (rows <= cols + 2) break;
+    cols++;
+  }
+  return cols;
+}
+
+/* ---------- render tile ---------- */
+function renderTile(tokRaw, showLabel){
+  const ins = parseMove(tokRaw);
+  if (!ins || !ins.dir) return null;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "tile";
+
+  const svg = el("svg",{ width:TILE, height:TILE, viewBox:`0 0 ${TILE} ${TILE}` });
+
+  const note = notationString(ins);
+
+  // ✅ NEW RULE:
+  // remove middle-row inner verticals ONLY when label length is 3
+  // (e.g., Rw2, Uw2, Fw2, Bw2, F'2, etc.)
+  const hideMiddleRowInnerVerticals = (note.length === 3);
+  drawGrid(svg, hideMiddleRowInnerVerticals);
+
+  const xLeft  = PAD + 0.5*CELL;
+  const xMid   = PAD + 1.5*CELL;
+  const xRight = PAD + 2.5*CELL;
+
+  const yTop   = PAD + 0.5*CELL;
+  const yMid   = PAD + 1.5*CELL;
+  const yBot   = PAD + 2.5*CELL;
+
+  // R/L/U/D normal + wide (two arrows)
+  if(ins.baseUpper==="R"){ drawStraightArrow(svg, ins.dir, xRight, yMid); if(ins.isWide) drawStraightArrow(svg, ins.dir, xMid, yMid); }
+  if(ins.baseUpper==="L"){ drawStraightArrow(svg, ins.dir, xLeft,  yMid); if(ins.isWide) drawStraightArrow(svg, ins.dir, xMid, yMid); }
+  if(ins.baseUpper==="U"){ drawStraightArrow(svg, ins.dir, xMid,   yTop); if(ins.isWide) drawStraightArrow(svg, ins.dir, xMid, yMid); }
+  if(ins.baseUpper==="D"){ drawStraightArrow(svg, ins.dir, xMid,   yBot); if(ins.isWide) drawStraightArrow(svg, ins.dir, xMid, yMid); }
+
+  // M/E (no wide)
+  if(ins.baseUpper==="M"){ drawStraightArrow(svg, ins.dir, xMid, yMid); }
+  if(ins.baseUpper==="E"){ drawStraightArrow(svg, ins.dir, xMid, yMid); }
+
+  // F/B (wide uses bigger+inner arc)
+  if(ins.baseUpper==="F"){ ins.isWide ? drawCurvedWide(svg, ins.dir) : drawCurvedMove(svg, ins.dir); }
+  if(ins.baseUpper==="B"){ ins.isWide ? drawCurvedWide(svg, ins.dir) : drawCurvedMove(svg, ins.dir); }
+
+  // S (no wide)
+  if(ins.baseUpper==="S"){ drawCurvedMove(svg, ins.dir); }
+
+  // x/y rotations
+  if(ins.baseUpper==="X"){ drawXRotation(svg, ins.dir, showLabel); }
+  if(ins.baseUpper==="Y"){ drawYRotation(svg, ins.dir, showLabel); }
+
+
+  // notation text inside tile
+  if (showLabel) {
+    let pos = "center";
+
+    // avoid overlap on these
+    if (ins.baseUpper === "M") pos = "right";
+    if (ins.baseUpper === "E") pos = "up";
+
+    // x/y label should be centered
+    if (ins.baseUpper === "X") pos = "center";
+    if (ins.baseUpper === "Y") pos = "center";
+
+    // wide R/L/U/D: avoid middle arrow
+    if (ins.isWide && "RLUD".includes(ins.baseUpper)) {
+      if (ins.baseUpper === "R") pos = "left";
+      if (ins.baseUpper === "L") pos = "right";
+      if (ins.baseUpper === "U") pos = "down";
+      if (ins.baseUpper === "D") pos = "up";
+    }
+
+    drawCenterText(svg, note, pos);
+  }
+
+  wrapper.appendChild(svg);
+  return wrapper;
+}
+
+/* ---------- render ---------- */
+function renderAlg(){
+  const out = document.getElementById("out");
+  const showLabel = document.getElementById("showLabels").checked;
+
+  const toks = parseAlg(document.getElementById("alg").value);
+  out.style.gridTemplateColumns = `repeat(${chooseColumns(toks.length)}, max-content)`;
+
+  out.innerHTML = "";
+  toks.forEach(tok => {
+    const tile = renderTile(tok, showLabel);
+    if (tile) out.appendChild(tile);
+  });
+}
+
+/* ---------- events ---------- */
+document.getElementById("showLabels").addEventListener("change", renderAlg);
+document.getElementById("alg").addEventListener("input", renderAlg);
+
+document.getElementById("maxCols").addEventListener("input", renderAlg);
+document.getElementById("maxRows").addEventListener("input", renderAlg);
+
+document.getElementById("darkMode").addEventListener("change", (e) => {
+  document.body.classList.toggle("dark", e.target.checked);
+});
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  document.getElementById("alg").value = "";
+  renderAlg();
+});
+
+// apply dark mode on load
+document.body.classList.toggle("dark", document.getElementById("darkMode").checked);
+
+renderAlg();
+</script>
+
+</body>
+</html>
